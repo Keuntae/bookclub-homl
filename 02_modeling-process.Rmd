@@ -1,19 +1,350 @@
 # Modeling Process
 
-**Learning objectives:**
+- **Very iterative and heuristic-based**
+- Many ML approaches should be applied, evaluated, and modified before we get the final model for results.
+- Approaching ML modeling correctly:
+  * **Spending data wisely** on learning and variation procedures
+  * **Properly preprocessing** the feature and target variables
+  * **Minimizing** data leakage
+  * **Tuning** parameters
+  * **Assessing** model performance
 
-- THESE ARE NICE TO HAVE BUT NOT ABSOLUTELY NECESSARY
+:::{style="text-align:center;"}
+![Figure 2.1 General predictive machine learning process](https://bradleyboehmke.github.io/HOML/images/modeling_process.png)  
+:::
 
-## SLIDE 1 {-}
 
-- ADD SLIDES AS SECTIONS (`##`).
-- TRY TO KEEP THEM RELATIVELY SLIDE-LIKE; THESE ARE NOTES, NOT THE BOOK ITSELF.
 
-## Meeting Videos {-}
+## Prerequisites
 
-### Cohort 1 {-}
+```{r packages, eval=FALSE}
+# Helper packages
+library(dplyr)     # for data manipulation
+library(ggplot2)   # for awesome graphics
 
-`r knitr::include_url("https://www.youtube.com/embed/URL")`
+# Modeling process packages
+library(rsample)   # for resampling procedures
+library(caret)     # for resampling and model training
+library(h2o)       # for resampling and model training
+
+# h2o set-up 
+h2o.no_progress()  # turn off h2o progress bars
+h2o.init()         # launch h2o
+```
+
+``` {r data_import, eval=FALSE}
+# Ames housing data
+ames <- AmesHousing::make_ames()
+ames.h2o <- as.h2o(ames)
+
+# Job attrition data
+churn <- modeldata::attrition %>% 
+  mutate_if(is.ordered, .funs = factor, ordered = FALSE)
+churn.h2o <- as.h2o(churn)
+```
+
+
+
+## Data splitting
+- **<i>Generalizability</i>** of an algorithm
+  * <i>We want **<u>an algorithm</u>** that not only fits well to our past data, but more importantly, one that predicts a future outcome accurately.</i>
+- "Spending" our data wisely
+  * Splitting our data 
+    + **Training dataset:** 
+    + **Test dataset:**
+  * Typical recommendations for splitting data (Training:Test)
+    + 60% + 40% | 70% + 30% | 80% + 20%
+    + Depending on the size of our data<br /> 
+      >> too large: less training data | too small: more training data
+
+### Simple random sampling
+- Just splitting the data without any control for any data attributes
+
+``` {r simple_sampling, eval=FALSE}
+options(scipen=999)
+
+# Using base R
+set.seed(123)  # for reproducibility
+index_1 <- sample(1:nrow(ames), round(nrow(ames) * 0.7))
+train_1 <- ames[index_1, ]
+test_1  <- ames[-index_1, ]
+
+# Using caret package
+set.seed(123)  # for reproducibility
+index_2 <- createDataPartition(ames$Sale_Price, p = 0.7, 
+                               list = FALSE)
+train_2 <- ames[index_2, ]
+test_2  <- ames[-index_2, ]
+
+# Using rsample package
+set.seed(123)  # for reproducibility
+split_1  <- initial_split(ames, prop = 0.7)
+train_3  <- training(split_1)
+test_3   <- testing(split_1)
+
+# Using h2o package
+split_2 <- h2o.splitFrame(ames.h2o, ratios = 0.7, 
+                          seed = 123)
+train_4 <- split_2[[1]]
+test_4  <- split_2[[2]]
+
+```
+
+Figure 2.3 Training (black) vs. Test (red) response distribution
+
+``` {r sampling_plots, eval=FALSE}
+library(ggplot2)
+p1 <- ggplot(train_1, aes(x = Sale_Price)) + 
+    geom_density(trim = TRUE) + 
+    geom_density(data = test_1, trim = TRUE, col = "red") +
+  ggtitle("Base R")
+
+p2 <- ggplot(train_2, aes(x = Sale_Price)) + 
+    geom_density(trim = TRUE) + 
+    geom_density(data = test_2, trim = TRUE, col = "red") +
+    theme(axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.y = element_blank()) +
+    ggtitle("caret") 
+
+p3 <- ggplot(train_3, aes(x = Sale_Price)) + 
+    geom_density(trim = TRUE) + 
+    geom_density(data = test_3, trim = TRUE, col = "red") +
+    theme(axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.y = element_blank()) +
+    ggtitle("rsample")
+
+p4 <- ggplot(as.data.frame(train_4), aes(x = Sale_Price)) + 
+    geom_density(trim = TRUE) + 
+    geom_density(data = as.data.frame(test_4), trim = TRUE, col = "red") +
+    theme(axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.y = element_blank()) +
+    ggtitle("h2o")
+
+# Side-by-side plots
+gridExtra::grid.arrange(p1, p2, p3, p4, nrow = 1)
+
+```
+
+### Stratified sampling
+- Control the sampling so that **our training and test sets have similar distributions.**
+  * Used when the response variable may be severely imbalanced (i.e., 90%: yes, 10%: no)
+  * Data sets that have small sample size 
+  * when the response variable deviates strongly from normality (highly positively skewed)
+- Using the `strata` argument in the `rsample` package
+
+``` {r stratified, eval=FALSE}
+# orginal response distribution
+table(churn$Attrition) %>% prop.table()
+
+# stratified sampling with the rsample package
+set.seed(123)
+split_strat  <- initial_split(churn, prop = 0.7, 
+                              strata = "Attrition")
+train_strat  <- training(split_strat)
+test_strat   <- testing(split_strat)
+
+# consistent response ratio between train & test
+table(train_strat$Attrition) %>% prop.table()
+table(test_strat$Attrition) %>% prop.table()
+```
+
+### Class imbalance 
+- When one class has very small portion of observations. 
+- **up-sampling** vs. **down-sampling**
+  * up-sampling
+    + used **when the quantity of data is insufficient**
+    + increasing the size of rarer samples
+    + using repetition or **bootstrapping**
+  * down-sampling
+    + used **when the quantity of data is sufficient**
+    + keeping all samples in the rare sample class and randomly selecting an equal number of samples in the abundant classes
+    + reduce the computation burdens
+- A combination of over- and under-sampling is often successful
+  * Synthetic Minority Over-Sampling Technique (i.e., SMOTE)
+- **class weighting schemes to overcome data imbalance problems internally.**
+
+
+
+## Creating models in R
+- More than one R package to perform each algorithm (e.g., 20+ R packages for random forests)
+- **Inconsistencies** exists in terms of: 
+  1. how algorithms allow you to define the formula of interest 
+  2. how the results and predictions are supplied. 
+
+### Many formula interfaces
+- Specifying a symbolic representation of the terms 
+  * `Y ~ X`: Y is a function of X
+  * Using the formula in the `lm` function
+  * Disadvantages
+    + no nest in-line functions
+    + model matrix calculation happened at once
+    + not efficient for the large wide data
+    + limited roles in which variables play roles
+    + Specifying multivariate outcomes is clunky and inelegant
+    + lack of consistency
+- **non-formula** interface
+  * separate arguments for the predictors and the outcome(s)
+  * more efficient calculations, but inconvenient if the date have transformed/factor/interaction variables
+- **variable name specification**
+  * specifying the features and response with character strings (used in the `h2o` package)
+
+### Many engines
+- used to overcome consistency problems in the formula terms
+- more consistency, but lack of flexibility
+
+## Resampling methods
+- <i>How do we assess **the generalization performance of the model?**</i>
+- Using the **validation approach**
+  * <b>Splitting</b> the training data set further to create two parts
+    + **a training set** 
+    + **a validation (hold-out) set**
+- Using single hold-out data set is highly likely to be variable and unreliable for measuring the modeling performance. 
+
+### k-fold cross valudation
+- Randomly divides the training data into k groups
+- Dividing the training data set of almost equal size
+- Every observation becomes a part of **hold-out** data set across all the groups
+
+:::{style="text-align:center;"}
+![Figure 2.4 Illusatration of the k-fold cross validation process](https://bradleyboehmke.github.io/HOML/images/cv.png)  
+:::
+<br />
+
+### Bootstrapping
+- A random sample of data **with replacement**
+- The same size of the training data set
+
+:::{style="text-align:center;"}
+![Figure 2.5 Illusatration of the bootstrapping process](https://bradleyboehmke.github.io/HOML/images/bootstrap-scheme.png)  
+:::
+<br />
+
+### Alternatives
+- Jackknife resampling (i.e., **leave-one-out** resampling technique)
+  * the most extreme and computational burdensome sampling technique
+  * good for the small sample size and optimized modeling process
+
+:::{style="text-align:center;"}
+![Illusatration of the Jackknife process<br />(source: YouTuber Jackknife Tutorial: https://www.youtube.com/watch?v=p9XPclE7NtA)](https://i.ytimg.com/vi/p9XPclE7NtA/hqdefault.jpg)  
+:::
+
+## Bias variance trade-off
+- **Bias** (error due to "bias")
+  * <b>The difference</b> between the expected (or average) prediction of our model ans the correct value
+  * <i>How well a model can conform to the underlying structure of the data?</i>
+- **Variance** (error due to "variance")
+  * <b>The variability</b> of a model prediction for a given data point
+  * Models with a higher variance (e.g., k-nearest neighbor, decision trees, gradient boosting machines): **using resampling techniques to reduce the risk**
+- **Hyperparameters**
+  * The bias-variance trade-off
+  * dependent on the data and problem at hand 
+  * repeating possible k-values until the model get the minimum error
+
+:::{style="text-align:center;"}
+![Figure 2.10 k-nearest neighbor model with different k values](https://bradleyboehmke.github.io/HOML/02-modeling-process_files/figure-html/modeling-process-knn-options-1.png)  
+:::
+<br />
+
+:::{style="text-align:center;"}
+![Figure 2.11 Selecting a k-value with a minimum RMSE error values](https://bradleyboehmke.github.io/HOML/02-modeling-process_files/figure-html/modeling-process-knn-tune-1.png)  
+:::
+
+## Model evaluation
+- **Loss functions:** metrics that compare the predicted values to the actual values
+- Aggregating the error across the entire validation data sets
+
+### Regression Models
+- **Minimize:** MSE (Mean Squared Error), RMSE (R mean squared error), Deviance (mean residual variance), Mean absolute error (MAE), RMSLE(Root mean square logarithmic error)
+- **Maximize:** R2 (R squared) 
+
+### Classfication Models
+- **Minimize:** Misclassification, Mean per class error, MSE (Mean sqaured error), Cross-entropy (Log Loss or Deviance), Gini index
+- **Confusion Matrix** that compares actual categorical levels to predicted categorical levels (objective: **Maximize**).
+  * <b>Accuracy:</b> How often is the classifier correct?
+  * <b>Precision:</b> How accurately does the classifier predict events?
+  * <b>Sensitivity:</b> How accurately does the classifier classify acrual events?
+  * <b>Specificity:</b> How accurately does the classifier classify acrual non-events?
+<br />
+
+:::{style="text-align:center;"}
+![Figure 2.12 Confusion matrix and relationships to terms such as true-positive and false negative](https://bradleyboehmke.github.io/HOML/images/confusion-matrix.png)  
+:::
+
+An Example<br />
+
+:::{style="text-align:center;"}
+![Figure 2.13 Example confusion matrix](https://bradleyboehmke.github.io/HOML/images/confusion-matrix2.png)  
+:::  
+<br />
+
+
+- **Area Under Curve (AUC)**
+  * **A ROC curve** that plots the false positive rate along the x-axis and the true positive rate along the y-axis
+  * **The higher** the line is in the upper left-hand corner, **the better.** 
+  * **AUC computes the area under this curve.**
+
+:::{style="text-align:center;"}
+![Figure 2.14 ROC Curve](https://bradleyboehmke.github.io/HOML/02-modeling-process_files/figure-html/modeling-process-roc-1.png)  
+:::  
+
+
+
+## Putting the processes together
+``` {r ames1, eval=FALSE}
+# Stratified sampling with the rsample package
+set.seed(123)
+split <- initial_split(ames, prop = 0.7, 
+                       strata = "Sale_Price")
+ames_train  <- training(split)
+ames_test   <- testing(split)
+```
+
+
+1. **Resampling:** 10-fold cross validation repeated 5 times
+2. **Grid search:** Specifying the hyperparameter values to assess k=2, 3, 4, ... 25
+3. **Model training & validation:** k-nearest neighbor (`method="knn`, `trControl=cv`, `tuneGrid=hyper_grid`, `metric="RMSE"`)
+
+
+``` {r ames2, eval=FALSE}
+# Specify resampling strategy
+cv <- trainControl(
+  method = "repeatedcv", 
+  number = 10, 
+  repeats = 5
+)
+
+# Create grid of hyperparameter values
+hyper_grid <- expand.grid(k = seq(2, 25, by = 1))
+
+# Tune a knn model using grid search
+knn_fit <- train(
+  Sale_Price ~ ., 
+  data = ames_train, 
+  method = "knn", 
+  trControl = cv, 
+  tuneGrid = hyper_grid,
+  metric = "RMSE"
+)
+```
+
+```{r ames_result, eval=FALSE}
+# Print and plot the CV results
+knn_fit
+
+ggplot(knn_fit)
+```
+
+:::{style="text-align:center;"}
+![Figure 2.15 Results from a grid search for a k-nearest neighbor model on the Ames housing data assessing values for k ranging from 2-25.](https://bradleyboehmke.github.io/HOML/02-modeling-process_files/figure-html/modeling-process-example-process-assess-1.png)  
+:::  
+
+
+
+
+## Chat Log {-}
 
 <details>
 <summary> Meeting chat log </summary>
